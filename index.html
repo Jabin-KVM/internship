@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Speech Recognition & Recording</title>
+<style>
+  body { font-family: sans-serif; }
+  .container { max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
+  button { padding: 10px; border: none; border-radius: 4px; margin: 5px; cursor: pointer; }
+  #startBtn { background-color: #4CAF50; color: white; }
+  #stopBtn { background-color: #f44336; color: white; }
+  #status { margin: 10px 0; color: #666; }
+  #output { margin-top: 20px; padding: 10px; border: 1px solid #ddd; min-height: 100px; background-color: #f9f9f9; color: black; }
+  .interim-output { color: #999; } /* Style for interim results */
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>Malayalam Speech Recognition & Recording</h1>
+  <button id="startBtn">Start Recording & Listening</button>
+  <button id="stopBtn" disabled>Stop Recording & Listening</button>
+  <div id="status">Ready</div>
+  <div id="output"></div>
+</div>
+
+<script>
+const outputDiv = document.getElementById('output');
+const statusDiv = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+let recognition;
+let mediaRecorder;
+let audioChunks = [];
+let stream;
+let interimOutputElement; // To hold the element for interim results
+
+function updateStatus(message, isError = false) {
+  statusDiv.innerHTML = isError ? `<span style="color:red">${message}</span>` : message;
+}
+
+// Function to create or get the interim output element
+function getOrCreateInterimOutputElement() {
+    if (!interimOutputElement) {
+        interimOutputElement = document.createElement('div');
+        interimOutputElement.className = 'interim-output';
+        outputDiv.appendChild(interimOutputElement);
+    }
+    return interimOutputElement;
+}
+
+// Function to remove the interim output element
+function removeInterimOutputElement() {
+    if (interimOutputElement) {
+        interimOutputElement.remove();
+        interimOutputElement = null;
+    }
+}
+
+
+// Check browser support for both SpeechRecognition and MediaRecorder
+if (!('webkitSpeechRecognition' in window) || !('MediaRecorder' in window)) {
+  updateStatus("Your browser doesn't fully support speech recognition and recording. Please use Chrome or Edge.", true);
+  startBtn.disabled = true;
+} else {
+  recognition = new webkitSpeechRecognition();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = 'ml-IN'; // Malayalam language code
+
+  recognition.onstart = function() {
+    updateStatus("Recording and Listening... Speak in Malayalam");
+    // Clear previous output but keep the element
+    outputDiv.innerHTML = '';
+    interimOutputElement = null; // Reset interim element on start
+  };
+
+  recognition.onresult = function(event) {
+    let finalTranscript = '';
+    let interimTranscript = '';
+
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      if (event.results[i].isFinal) {
+        finalTranscript += event.results[i][0].transcript;
+      } else {
+        interimTranscript += event.results[i][0].transcript;
+      }
+    }
+
+    // Update output with interim results
+    if (interimTranscript) {
+       getOrCreateInterimOutputElement().textContent = interimTranscript;
+    }
+
+    if (finalTranscript) {
+      // Remove interim output and add final to a new paragraph
+      removeInterimOutputElement();
+      const p = document.createElement('p');
+      p.style.color = 'black';
+      p.textContent = finalTranscript;
+      outputDiv.appendChild(p);
+
+      // Send final transcript to Flask backend
+      fetch('/process_transcription', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ transcription: finalTranscript })
+      })
+      .then(response => response.json())
+      .then(data => {
+        console.log('Transcription sent to backend:', data);
+        // You can update the status or UI based on the backend response
+      })
+      .catch(error => {
+        console.error('Error sending transcription to backend:', error);
+        updateStatus("Error sending transcription", true);
+      });
+    }
+  };
+
+  recognition.onerror = function(event) {
+    updateStatus("Error: " + event.error, true);
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+     // Stop MediaRecorder if recognition errors
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+    }
+     // Stop the audio stream tracks
+    if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+    }
+  };
+
+  recognition.onend = function() {
+    updateStatus("Ready to record and listen");
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    // Stop MediaRecorder is handled in stopBtn.onclick and onerror
+    // Stopping the stream tracks is handled in recognition.onend and mediaRecorder.onstop
+  };
+
+  startBtn.onclick = async function() {
+    try {
+      // Request microphone access
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // Start Speech Recognition
+      recognition.start();
+
+      // Start Media Recording
+      audioChunks = [];
+      mediaRecorder = new MediaRecorder(stream);
+
+      mediaRecorder.ondataavailable = function(event) {
+        audioChunks.push(event.data);
+      };
+
+      mediaRecorder.onstop = async function() {
+        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onloadend = function() {
+          const base64data = reader.result.split(',')[1];
+          // Send audio data to Flask backend
+           fetch('/process_audio', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ audio_data: base64data })
+          })
+          .then(response => response.json())
+          .then(data => {
+            console.log('Audio sent to backend:', data);
+             // You can update the status or UI based on the backend response
+          })
+          .catch(error => {
+            console.error('Error sending audio to backend:', error);
+            updateStatus("Error sending audio", true);
+          });
+        };
+        reader.readAsDataURL(audioBlob);
+
+        // Stop the audio stream tracks after recording stops
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+        }
+      };
+
+      mediaRecorder.start();
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      updateStatus("Recording and Listening...");
+
+    } catch (err) {
+      updateStatus("Error accessing microphone or starting recording: " + err.message, true);
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    }
+  };
+
+  stopBtn.onclick = function() {
+    // Stop Speech Recognition
+    recognition.stop();
+    // Stop Media Recording
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+    }
+    // Stopping the stream tracks is handled in recognition.onend and mediaRecorder.onstop
+    updateStatus("Stopping...");
+  };
+}
+</script>
+
+</body>
+</html>
